@@ -1,0 +1,40 @@
+# Redis + 3 API replicas + nginx load balancer.
+#   docker compose up -d --build                          # default: centralized Redis limiting
+#   RATE_LIMIT_MODE=memory docker compose up -d           # per-replica limiting (shows the problem)
+#   docker compose up -d --scale api=5                    # more replicas
+# Dashboard: http://localhost:8080
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # counters are short-lived: no persistence needed
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      REDIS_URL: redis://redis:6379
+      RATE_LIMIT_MODE: ${RATE_LIMIT_MODE:-redis}
+      RATE_LIMIT: ${RATE_LIMIT:-20}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-10000}
+      RATE_LIMIT_FAIL_OPEN: ${RATE_LIMIT_FAIL_OPEN:-true}
+      ALLOW_MODE_OVERRIDE: "true"   # lets the dashboard compare all modes without restarts
+    deploy:
+      replicas: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    environment:
+      NGINX_RESOLVER: 127.0.0.11   # Docker's DNS: "api" resolves to one IP per replica
+      API_HOST: api
+    ports:
+      - "${GATEWAY_PORT:-8080}:80"
+    depends_on:
+      - api

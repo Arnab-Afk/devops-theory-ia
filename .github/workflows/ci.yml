@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit + Redis integration tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 3s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm test
+        env:
+          REDIS_URL: redis://localhost:6379
+
+  e2e:
+    name: End-to-end burst (3 replicas behind nginx)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Start Redis, 3 API replicas and the gateway
+        run: docker compose up -d --build --wait
+      - name: Fire concurrent bursts and check each mode behaves as expected
+        run: node scripts/burst.js --requests 100 --check
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 50
+      - run: docker compose down
+        if: always()
+
+  images:
+    name: Build and push images (GHCR)
+    needs: e2e
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image names (GHCR needs lowercase)
+        id: names
+        run: echo "repo=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: backend
+          push: true
+          tags: |
+            ${{ steps.names.outputs.repo }}/api:${{ github.sha }}
+            ${{ steps.names.outputs.repo }}/api:latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: gateway/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.names.outputs.repo }}/gateway:${{ github.sha }}
+            ${{ steps.names.outputs.repo }}/gateway:latest

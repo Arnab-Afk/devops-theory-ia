@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ratelimit
+resources:
+  - namespace.yaml
+  - redis.yaml
+  - api.yaml
+  - hpa.yaml
+  - gateway.yaml
+# Content-hashed name: changing a value rolls the API pods automatically
+configMapGenerator:
+  - name: api-config
+    literals:
+      - REDIS_URL=redis://redis:6379
+      - RATE_LIMIT_MODE=redis            # memory | redis-naive | redis
+      - RATE_LIMIT=20
+      - RATE_LIMIT_WINDOW_MS=10000
+      - RATE_LIMIT_FAIL_OPEN=true
+      - ALLOW_MODE_OVERRIDE=true         # demo only: lets clients pick the mode per request
+      - WORK_MS=20
+# Point these at your registry, e.g. ghcr.io/arnab-afk/devops-theory-ia/api
+images:
+  - name: rate-limit-api
+    newName: rate-limit-api
+    newTag: latest
+  - name: rate-limit-gateway
+    newName: rate-limit-gateway
+    newTag: latest

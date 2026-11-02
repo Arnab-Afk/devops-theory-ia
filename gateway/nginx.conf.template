@@ -1,0 +1,33 @@
+# Load balancer in front of the API replicas. Rendered by the nginx image at startup
+# (${VAR} values come from the environment; nginx's own $variables are left alone).
+# Round-robin across every replica, so one client's requests land on different replicas,
+# which is exactly what breaks per-replica (in-memory) rate limiting.
+#   NGINX_RESOLVER: Docker Compose 127.0.0.11, Kubernetes kube-dns.kube-system.svc.cluster.local
+#   API_HOST:       the API service name
+resolver ${NGINX_RESOLVER} valid=5s ipv6=off;
+
+upstream api {
+    zone api 64k;
+    server ${API_HOST}:3000 resolve;   # re-resolved, so replicas added or removed are picked up
+}
+
+server {
+    listen 80;
+
+    location /api/ {
+        proxy_pass http://api;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $host;
+        proxy_next_upstream off;   # never retry a request on another replica: it would be counted twice
+    }
+
+    location = /health {
+        proxy_pass http://api;
+    }
+
+    # Live demo dashboard
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+    }
+}

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed Rate Limiting</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6eb;
+    --ok: #1f9d55; --block: #d64545; --err: #9aa4b2; --accent: #2457d6;
+    --r0: #2457d6; --r1: #c2410c; --r2: #7c3aed; --r3: #0e7490; --r4: #be185d; --r5: #4d7c0f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --text: #e6e9ee; --muted: #97a1ae; --line: #2a3039;
+      --ok: #34c77b; --block: #f06a6a; --err: #5c6672; --accent: #6b93ff;
+      --r0: #6b93ff; --r1: #fb923c; --r2: #a78bfa; --r3: #22d3ee; --r4: #f472b6; --r5: #a3e635;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; }
+  .bar .cfg { color: var(--muted); margin-right: auto; }
+  .bar .cfg b { color: var(--text); }
+  label { color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  input[type=number] { width: 72px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  button { padding: 8px 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: wait; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .col { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .col h2 { font-size: 16px; margin: 0; }
+  .col h2 code { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .col p { margin: 0; color: var(--muted); font-size: 13px; min-height: 40px; }
+  .score { display: flex; align-items: baseline; gap: 8px; }
+  .score .n { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .score .of { color: var(--muted); }
+  .verdict { font-size: 13px; font-weight: 600; padding: 2px 8px; border-radius: 999px; margin-left: auto; }
+  .verdict.bad { background: color-mix(in srgb, var(--block) 15%, transparent); color: var(--block); }
+  .verdict.good { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(18px, 1fr)); gap: 4px; }
+  .cell { aspect-ratio: 1; border-radius: 3px; background: var(--line); border-bottom: 3px solid transparent; transition: background .15s; }
+  .cell.ok { background: var(--ok); }
+  .cell.block { background: var(--block); opacity: .55; }
+  .cell.err { background: var(--err); }
+  .replicas { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+  .rep { display: grid; grid-template-columns: 110px 1fr 34px; gap: 8px; align-items: center; }
+  .rep .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .rep .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .rep .track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .rep .fill { height: 100%; background: var(--ok); }
+  .rep .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 18px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .note { color: var(--muted); font-size: 13px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Distributed rate limiting with Redis</h1>
+  <p class="sub">One client fires a burst at an API running as several replicas behind a round-robin load balancer. Same burst, three ways of counting.</p>
+
+  <div class="bar">
+    <div class="cfg" id="cfg">Loading config…</div>
+    <label>Requests <input type="number" id="n" value="60" min="1" max="500"></label>
+    <label><input type="checkbox" id="reuse"> Same client as last burst</label>
+    <button id="fire">Fire burst</button>
+  </div>
+
+  <div class="cols" id="cols"></div>
+
+  <div class="legend">
+    <span><i style="background:var(--ok)"></i>200 allowed</span>
+    <span><i style="background:var(--block);opacity:.55"></i>429 rate limited</span>
+    <span><i style="background:var(--err)"></i>error</span>
+    <span>Coloured underline = replica that answered</span>
+  </div>
+  <p class="note">Browsers open only ~6 connections per site, so the dashboard's burst is only partly concurrent. For a fully concurrent burst (which exposes the race in <code>redis-naive</code>), run <code>node scripts/burst.js</code>.</p>
+</main>
+
+<script>
+const MODES = [
+  { id: 'memory', title: 'Per-replica memory', text: 'Each replica keeps its own counter. The load balancer spreads the client over N replicas, so it gets N × the limit.' },
+  { id: 'redis-naive', title: 'Redis, non-atomic', text: 'Shared counter, but check and record are separate steps: read the count, handle the request, then INCR. Concurrent requests all read the same old count.' },
+  { id: 'redis', title: 'Redis, atomic Lua', text: 'Shared sliding window updated in one Lua script, using Redis\'s clock. Exactly the limit, whatever the replica count.' },
+];
+const replicaColors = {};
+const colorFor = (name) => {
+  if (!(name in replicaColors)) replicaColors[name] = `var(--r${Object.keys(replicaColors).length % 6})`;
+  return replicaColors[name];
+};
+let config = null;
+let lastKey = {};
+
+const $ = (id) => document.getElementById(id);
+$('cols').innerHTML = MODES.map((m) => `
+  <section class="col" id="col-${m.id}">
+    <h2>${m.title} <code>${m.id}</code></h2>
+    <p>${m.text}</p>
+    <div class="score"><span class="n">–</span><span class="of"></span><span class="verdict"></span></div>
+    <div class="grid"></div>
+    <div class="replicas"></div>
+  </section>`).join('');
+
+fetch('/api/config').then((r) => r.json()).then((c) => {
+  config = c;
+  $('cfg').innerHTML = `Limit <b>${c.limit}</b> requests / <b>${c.windowMs / 1000}s</b> per client · default mode <b>${c.mode}</b>` +
+    (c.modeOverride ? '' : ' · <b style="color:var(--block)">mode override disabled: all columns use the default</b>');
+}).catch(() => { $('cfg').textContent = 'API not reachable'; });
+
+async function burst(mode, n) {
+  const col = $(`col-${mode}`);
+  const grid = col.querySelector('.grid');
+  grid.innerHTML = '<div class="cell"></div>'.repeat(n);
+  const cells = grid.children;
+  const key = $('reuse').checked && lastKey[mode] ? lastKey[mode] : `dash-${mode}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  lastKey[mode] = key;
+
+  const results = await Promise.all(Array.from({ length: n }, (_, i) =>
+    fetch('/api/resource', { headers: { 'x-api-key': key, 'x-ratelimit-mode': mode }, cache: 'no-store' })
+      .then((res) => ({ status: res.status, replica: res.headers.get('x-served-by') }))
+      .catch(() => ({ status: 0, replica: null }))
+      .then((r) => {
+        cells[i].className = 'cell ' + (r.status === 200 ? 'ok' : r.status === 429 ? 'block' : 'err');
+        if (r.replica) cells[i].style.borderBottomColor = colorFor(r.replica);
+        cells[i].title = `${r.status} from ${r.replica || '?'}`;
+        return r;
+      })));
+
+  const allowed = results.filter((r) => r.status === 200).length;
+  const limit = config ? config.limit : NaN;
+  col.querySelector('.n').textContent = allowed;
+  col.querySelector('.of').textContent = `allowed · limit ${limit}`;
+  const v = col.querySelector('.verdict');
+  const over = allowed - limit;
+  v.textContent = over > 0 ? `${(allowed / limit).toFixed(1)}× the limit` : 'within limit';
+  v.className = 'verdict ' + (over > 0 ? 'bad' : 'good');
+
+  const per = {};
+  for (const r of results) if (r.replica) per[r.replica] = (per[r.replica] || 0) + (r.status === 200 ? 1 : 0);
+  const max = Math.max(1, ...Object.values(per));
+  col.querySelector('.replicas').innerHTML = Object.entries(per).sort().map(([name, a]) => `
+    <div class="rep">
+      <span class="name"><span class="dot" style="background:${colorFor(name)}"></span>${name}</span>
+      <span class="track"><span class="fill" style="display:block;width:${(a / max) * 100}%"></span></span>
+      <span class="v">${a}</span>
+    </div>`).join('');
+}
+
+$('fire').addEventListener('click', async () => {
+  const n = Math.min(500, Math.max(1, Number($('n').value) || 60));
+  $('fire').disabled = true;
+  try {
+    await Promise.all(MODES.map((m) => burst(m.id, n)));
+  } finally {
+    $('fire').disabled = false;
+  }
+});
+</script>
+</body>
+</html>
