@@ -104,8 +104,13 @@ function check(runs, limit) {
     const replicas = Object.keys(r.perReplica).length;
     expect(r.errors === 0, `${r.mode}: no errors (${r.errors})`);
     if (r.mode === 'redis') expect(r.allowed === limit, `redis: exactly ${limit} allowed (${r.allowed})`);
-    if (r.mode === 'memory')
-      expect(replicas > 1 && r.allowed === replicas * limit, `memory: ${replicas} replicas x ${limit} = ${replicas * limit} allowed (${r.allowed})`);
+    if (r.mode === 'memory') {
+      // Each replica enforces the limit on its own share of the traffic. Kubernetes spreads requests
+      // randomly, so a replica may receive fewer than `limit`: expect min(received, limit) from each.
+      const expected = Object.values(r.perReplica).reduce((sum, p) => sum + Math.min(p.allowed + p.blocked, limit), 0);
+      expect(replicas > 1 && r.allowed === expected && r.allowed > limit,
+        `memory: each of ${replicas} replicas allows up to ${limit} -> ${expected} expected (${r.allowed})`);
+    }
     if (r.mode === 'redis-naive') expect(r.allowed > limit, `redis-naive: race lets more than ${limit} through (${r.allowed})`);
   }
   return ok;
