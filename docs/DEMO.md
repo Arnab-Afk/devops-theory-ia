@@ -40,7 +40,7 @@ Reset with `docker compose up -d --scale api=3`.
 ## Kubernetes variant
 
 ```bash
-kubectl apply -k k8s
+kubectl apply -k k8s/base
 kubectl -n ratelimit get pods -l app=api -w                         # terminal A
 node scripts/burst.js --url http://localhost:8181                   # terminal B
 kubectl -n ratelimit patch hpa api -p '{"spec":{"minReplicas":6}}'  # scale out
@@ -55,3 +55,30 @@ kubectl -n ratelimit exec deploy/redis -- redis-cli monitor         # terminal C
   are only partly concurrent and the `redis-naive` race looks small there. Use `burst.js` for step 6.
 - Each burst uses a fresh client key, so runs never share a window. Tick **Same client as last burst**
   in the dashboard to show that a client stays blocked for the rest of its window.
+
+## AWS variant (EC2 + k3s, images in ECR)
+
+Create and deploy (about 5 minutes; costs roughly $0.10/hour until destroyed):
+
+```bash
+terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform apply        # EC2 m7i-flex.large + k3s, Elastic IP, ECR, SSH key
+scripts/deploy-aws.sh                         # build, push to ECR, deploy, wait until limiting is live
+export KUBECONFIG=$PWD/kubeconfig
+IP=$(terraform -chdir=infra/terraform output -raw public_ip)
+```
+
+Then run the Kubernetes variant above with `http://$IP` instead of `http://localhost:8181`.
+
+Act 1 over the internet: send the requests over **one connection**. With a new connection per
+request (about 0.5 s each from far away), 25 requests take longer than the 10-second window and
+never hit the limit, which is correct behaviour but a poor demo:
+
+```bash
+curl -s -w "%{http_code} " -H "x-api-key: alice" $(for i in $(seq 25); do printf -- "-o /dev/null http://$IP/api/resource "; done); echo
+```
+
+Expect 20 x `200` then `429`. Over the internet the `redis-naive` race is smaller (about 50-120 of
+300) because network jitter spreads the requests out; `memory` and `redis` behave exactly as locally.
+
+Tear down: `terraform -chdir=infra/terraform destroy`.

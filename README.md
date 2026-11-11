@@ -43,12 +43,12 @@ docker build -t rate-limit-api:latest backend
 docker build -f gateway/Dockerfile -t rate-limit-gateway:latest .
 k3d cluster create ratelimit -p "8181:80@loadbalancer"          # or any cluster
 k3d image import -c ratelimit rate-limit-api:latest rate-limit-gateway:latest
-kubectl apply -k k8s
+kubectl apply -k k8s/base
 node scripts/burst.js --url http://localhost:8181
 kubectl -n ratelimit patch hpa api -p '{"spec":{"minReplicas":6}}'   # scale out, burst again
 ```
 
-On other clusters, point the `images:` entries in `k8s/kustomization.yaml` at the GHCR images
+On other clusters, point the `images:` entries in `k8s/base/kustomization.yaml` at the GHCR images
 the pipeline publishes (`ghcr.io/arnab-afk/devops-theory-ia/api`, `.../gateway`), or use
 `kubectl -n ratelimit port-forward svc/gateway 8181:80` if there is no LoadBalancer.
 
@@ -102,7 +102,10 @@ backend/tests/          unit tests, Redis concurrency tests
 gateway/                nginx round-robin load balancer (templated for Compose and Kubernetes)
 dashboard/index.html    live demo page
 scripts/burst.js        concurrent burst + results table (+ --check for CI)
-k8s/                    namespace, Redis, API (3 replicas), HPA (3-6), gateway, Kustomize config
+k8s/base/               namespace, Redis, API (3 replicas), HPA (3-6), gateway, Kustomize config
+k8s/overlays/aws/       ECR images + pull secret for the AWS deployment
+infra/terraform/        EC2 + k3s, Elastic IP, security group, ECR, SSH key
+scripts/deploy-aws.sh   build, push to ECR, deploy to the EC2 cluster
 docs/DEMO.md            live demo script
 docs/REPORT.md          theory report and results
 ```

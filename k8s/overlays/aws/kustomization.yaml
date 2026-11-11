@@ -1,0 +1,15 @@
+# AWS: images come from Amazon ECR, pulled with the ecr-pull secret (refreshed by scripts/deploy-aws.sh,
+# because ECR tokens expire after 12 hours). The image names below are set by the deploy script.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: (api|gateway)
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: ecr-pull

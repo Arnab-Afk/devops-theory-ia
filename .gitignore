@@ -2,3 +2,13 @@ node_modules/
 .env
 *.log
 results/
+
+# Terraform
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+infra/terraform/*.tfvars
+infra/terraform/*.pem
+infra/terraform/.terraform.lock.hcl
+infra/terraform/tfplan
+# Cluster credentials
+kubeconfig
